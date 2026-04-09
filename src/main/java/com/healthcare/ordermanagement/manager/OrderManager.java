@@ -16,117 +16,73 @@ import java.util.List;
 @Service
 public class OrderManager {
 
-    private final OrderFactory orderFactory;
-    private final OrderAccess orderAccess;
-    private final TriagingEngine triagingEngine;
-    private final NotificationService notificationService;
-    private final CommandLog commandLog;
-    private final OrderHandlerFactory orderHandlerFactory;
+    private final OrderFactory         orderFactory;
+    private final OrderAccess          orderAccess;
+    private final TriagingEngine       triagingEngine;
+    private final NotificationService  notificationService;
+    private final CommandLog           commandLog;
+    private final OrderHandlerFactory  orderHandlerFactory;
 
-    
     public OrderManager(OrderFactory orderFactory,
                         OrderAccess orderAccess,
                         TriagingEngine triagingEngine,
                         NotificationService notificationService,
                         CommandLog commandLog,
                         OrderHandlerFactory orderHandlerFactory) {
-        this.orderFactory        = orderFactory;
-        this.orderAccess         = orderAccess;
-        this.triagingEngine      = triagingEngine;
+        this.orderFactory       = orderFactory;
+        this.orderAccess        = orderAccess;
+        this.triagingEngine     = triagingEngine;
         this.notificationService = notificationService;
-        this.commandLog          = commandLog;
+        this.commandLog         = commandLog;
         this.orderHandlerFactory = orderHandlerFactory;
     }
 
-    // ── Use Case 1: Submit an order ───────────────────────────────────────────
+    // ── Use Case 1: Submit ────────────────────────────────────────────────────
 
-    /**
-     * Handles a new order submission from a clinician.
-     * The flow is:
-     * - Create the right type of order
-     * - Run it through validation and processing steps
-     * - Place it into the triage queue
-     * - Save it and send a notification
-     * - Log the action for auditing
-     */
-    public Order submitOrder(String orderType,
-                             String patientName,
-                             String clinicianName,
-                             String description,
-                             String priority) {
+    public Order submitOrder(String orderType, String patientName,
+                             String clinicianName, String description, String priority) {
+        Order order = orderFactory.createOrder(orderType, patientName, clinicianName, description, priority);
 
-        // Create the correct order type (Lab, Medication, Imaging)
-        Order order = orderFactory.createOrder(
-            orderType, patientName, clinicianName, description, priority
-        );
-
-        // Run the order through the decorator chain (validation, logging, etc.)
         OrderHandler chain = orderHandlerFactory.buildChain();
         chain.handle(order);
 
-        // Add the order to the triage queue based on priority
         triagingEngine.enqueue(order);
 
-        // Execute the command to save the order and notify the system
         Command command = new SubmitOrderCommand(order, orderAccess, notificationService);
         command.execute();
-
-        // Store the command in the audit log
         commandLog.record(command);
 
         return order;
     }
 
-    // ── Use Case 2a: Claim an order ───────────────────────────────────────────
+    // ── Use Case 2a: Claim ────────────────────────────────────────────────────
 
-    /**
-     * Allows a staff member to claim the next available order.
-     * Once claimed, the order is locked so others can’t take it.
-     */
     public Order claimNextOrder(String staffName) {
         Order next = triagingEngine.peekNext();
-
-        // Make sure the order isn’t already claimed
         if (next.getClaimedBy() != null) {
             throw new IllegalStateException(
-                "Order " + next.getOrderId() + " is already claimed by " + next.getClaimedBy()
-            );
+                "Order " + next.getOrderId() + " is already claimed by " + next.getClaimedBy());
         }
-
-        // Remove it from the queue since it's now being worked on
         triagingEngine.dequeue(next.getOrderId());
 
-        Command command = new ClaimOrderCommand(
-            next.getOrderId(), staffName, orderAccess, notificationService
-        );
+        Command command = new ClaimOrderCommand(next.getOrderId(), staffName, orderAccess, notificationService);
         command.execute();
         commandLog.record(command);
 
         return orderAccess.findOrderById(next.getOrderId());
     }
 
-    // ── Use Case 2b: Complete an order ────────────────────────────────────────
+    // ── Use Case 2b: Complete ─────────────────────────────────────────────────
 
-    /**
-     * Marks an order as completed by the staff member who claimed it.
-     */
     public Order completeOrder(String orderId, String staffName) {
         Order order = orderAccess.findOrderById(orderId);
-
-        // Only the person who claimed the order can complete it
         if (!staffName.equals(order.getClaimedBy())) {
-            throw new IllegalStateException(
-                staffName + " did not claim order " + orderId
-            );
+            throw new IllegalStateException(staffName + " did not claim order " + orderId);
         }
-
-        // Order must be in progress before it can be completed
         if (order.getStatus() != OrderStatus.IN_PROGRESS) {
             throw new IllegalStateException(
-                "Order " + orderId + " is not in progress — status is " + order.getStatus()
-            );
+                "Order " + orderId + " is not in progress — status is " + order.getStatus());
         }
-
         Command command = new CompleteOrderCommand(orderId, staffName, orderAccess, notificationService);
         command.execute();
         commandLog.record(command);
@@ -134,23 +90,13 @@ public class OrderManager {
         return orderAccess.findOrderById(orderId);
     }
 
-    // ── Use Case 3: Cancel an order ───────────────────────────────────────────
+    // ── Use Case 3: Cancel ────────────────────────────────────────────────────
 
-    /**
-     * Allows the clinician who created the order to cancel it,
-     * as long as it hasn’t started processing yet.
-     */
     public Order cancelOrder(String orderId, String clinicianName) {
         Order order = orderAccess.findOrderById(orderId);
-
-        // Only the original clinician can cancel the order
         if (!clinicianName.equals(order.getClinicianName())) {
-            throw new IllegalStateException(
-                clinicianName + " did not submit order " + orderId
-            );
+            throw new IllegalStateException(clinicianName + " did not submit order " + orderId);
         }
-
-        // Remove from queue before cancelling
         triagingEngine.dequeue(orderId);
 
         Command command = new CancelOrderCommand(orderId, clinicianName, orderAccess, notificationService);
@@ -160,29 +106,69 @@ public class OrderManager {
         return orderAccess.findOrderById(orderId);
     }
 
-  
+    // ── CHANGE 3: Undo — fixes TriagingEngine queue sync after undo ──────────
+
     public boolean undoLastCommand() {
-        return commandLog.undoLast();
+        Command undone = commandLog.undoLastAndGet();
+        if (undone == null) return false;
+
+        // Sync TriagingEngine with the state change caused by undo
+        switch (undone.getCommandType()) {
+
+            case "SUBMIT" -> {
+                // Undo of submit deletes the order → remove from engine queue too
+                triagingEngine.dequeue(undone.getOrderId());
+            }
+
+            case "CLAIM", "CANCEL" -> {
+                // Undo of claim/cancel restores order to PENDING → re-add to queue
+                try {
+                    Order restored = orderAccess.findOrderById(undone.getOrderId());
+                    if (restored.getStatus() == OrderStatus.PENDING) {
+                        triagingEngine.dequeue(restored.getOrderId()); // avoid duplicates
+                        triagingEngine.enqueue(restored);
+                    }
+                } catch (Exception ignored) {}
+            }
+
+            // COMPLETE undo → status goes back to IN_PROGRESS, not PENDING → no queue action
+        }
+        return true;
     }
 
-    
-    public List<Order> getQueue() {
-        return triagingEngine.getSortedQueue();
+    // ── CHANGE 3: Replay ──────────────────────────────────────────────────────
+
+    public boolean replayCommand(int index) {
+        Command replayed = commandLog.replayAt(index);
+        if (replayed == null) return false;
+
+        // Sync TriagingEngine after replay
+        switch (replayed.getCommandType()) {
+
+            case "SUBMIT" -> {
+                // Replay of submit re-saves order to OrderAccess → enqueue in engine
+                try {
+                    Order order = orderAccess.findOrderById(replayed.getOrderId());
+                    triagingEngine.dequeue(order.getOrderId()); // avoid duplicates
+                    triagingEngine.enqueue(order);
+                } catch (Exception ignored) {}
+            }
+
+            case "CANCEL" -> {
+                // Replay of cancel → order goes to CANCELLED → remove from engine
+                triagingEngine.dequeue(replayed.getOrderId());
+            }
+            // CLAIM replay → order already dequeued before it was claimed originally
+            // COMPLETE replay → already not in queue
+        }
+        return true;
     }
 
-    public List<Order> getAllOrders() {
-        return orderAccess.listAllOrders();
-    }
+    // ── Queries ───────────────────────────────────────────────────────────────
 
-    public Order getOrderById(String orderId) {
-        return orderAccess.findOrderById(orderId);
-    }
-
-    public List<Order> getOrdersByStatus(OrderStatus status) {
-        return orderAccess.listOrdersByStatus(status);
-    }
-
-    public List<CommandLogEntry> getCommandLog() {
-        return commandLog.getAll();
-    }
+    public List<Order>             getQueue()                      { return triagingEngine.getSortedQueue(); }
+    public List<Order>             getAllOrders()                   { return orderAccess.listAllOrders(); }
+    public Order                   getOrderById(String id)         { return orderAccess.findOrderById(id); }
+    public List<Order>             getOrdersByStatus(OrderStatus s){ return orderAccess.listOrdersByStatus(s); }
+    public List<CommandLogEntry>   getCommandLog()                 { return commandLog.getAll(); }
 }
