@@ -38,7 +38,7 @@ Client (REST Controllers)
 | Change | Pre-existing files modified | New files |
 |---|---|---|
 | Change 1 — Department-Aware Triage | 0 | TriageStrategyHolder (@Primary), LoadBalancingTriageStrategy, DeadlineFirstTriageStrategy, TriageStrategyController |
-| Change 2a — Multi-Channel Notifications | 1 (ConsoleNotificationService — structured output) | CompositeNotificationService, InAppNotificationService, EmailNotificationService, NotificationConfig, NotificationPreferences, NotificationMessage, NotificationPreferenceController |
+| Change 2a — Multi-Channel Notifications | 0 (ConsoleNotificationService — structured output)-> this changed for week1 rectification | CompositeNotificationService, InAppNotificationService, EmailNotificationService, NotificationConfig, NotificationPreferences, NotificationMessage, NotificationPreferenceController |
 | Change 2b — Order Processing Decorators | 1 (OrderHandlerFactory — new chain) | TimedPriorityBoostingDecorator, PriorityEscalationDecorator, StatAuditDecorator, ClockConfig |
 | Change 3 — Command Undo & Replay | 2 (CommandLog — replayAt/recordNote; OrderManager — queue sync) | ReplayController |
 
